@@ -1,0 +1,480 @@
+import asyncio
+import aiohttp
+import hashlib
+import json
+import time
+import os
+from bs4 import BeautifulSoup
+from urllib.parse import urlparse
+from urllib.robotparser import RobotFileParser
+from typing import List, Optional, Dict, Tuple
+
+# -------------------------------------------------------------------
+# Configuration
+# -------------------------------------------------------------------
+OUTPUT_FILE = "llm_dataset.jsonl"
+REQUEST_TIMEOUT = 15
+MAX_CONCURRENT = 5  # global concurrency cap across all domains
+MAX_RETRIES = 3
+RETRY_BACKOFF = 2
+USER_AGENT = "LLM Dataset Builder/1.0 (+https://myproject.org/bot)"  # honest UA
+TOKENIZER_NAME = "gpt2"
+MAX_CONTENT_BYTES = 5_000_000  # skip/truncate anything larger than ~5MB of HTML
+DEFAULT_CRAWL_DELAY = 1.0  # seconds, used when robots.txt gives no crawl-delay
+
+# License allowlist (URLs and keywords).
+#
+# Deliberately restricted to CC0 / Public Domain and CC-BY. These are the only
+# tiers with no conditions beyond (for CC-BY) attribution -- no share-alike,
+# no non-commercial, no no-derivatives. CC-BY-SA is intentionally excluded:
+# its share-alike clause could obligate you to release derivative works
+# (arguably including a model trained on the data) under the same license,
+# which isn't "do anything you want."
+#
+# NOTE: matching "cc-by" as a substring would also match "cc-by-sa" and
+# "cc-by-nc", so each accepted variant is listed explicitly rather than
+# relying on a short prefix.
+ALLOWED_LICENSES = {
+    "cc0",
+    "public domain",
+    "creativecommons.org/publicdomain/zero/",
+}
+
+# CC-BY variants matched as exact license strings/URLs, not substrings, so
+# CC-BY-SA / CC-BY-NC / CC-BY-ND don't accidentally slip through.
+ALLOWED_LICENSE_URL_PREFIXES = {
+    "creativecommons.org/licenses/by/",  # CC-BY only, any version
+}
+ALLOWED_LICENSE_EXACT_PHRASES = {
+    "cc-by",
+    "cc by",
+    "attribution 4.0",
+    "attribution 3.0",
+}
+# Phrases that, if present alongside a match above, disqualify it (catches
+# "CC-BY-SA" and "CC-BY-NC" being loosely matched by "cc-by").
+DISQUALIFYING_PHRASES = {
+    "-sa",
+    " sa",
+    "sharealike",
+    "share-alike",
+    "-nc",
+    " nc",
+    "noncommercial",
+    "non-commercial",
+    "-nd",
+    " nd",
+    "noderivatives",
+    "no derivatives",
+}
+
+FILTER_BY_LICENSE = True
+
+# Text-based license "guesses" (no explicit meta/link tag found) are inherently
+# unreliable -- a page can mention "public domain" in a footer, a quote, or in
+# reference to something else entirely. Mislabeling license data is a real risk
+# for a training set, so heuristic matches are excluded by default. Flip this on
+# only if you plan to manually review flagged documents before use.
+ALLOW_HEURISTIC_LICENSE = False
+
+# Respect AI-specific opt-out signals in addition to robots.txt Disallow rules
+# (X-Robots-Tag header and <meta name="robots"> content).
+RESPECT_AI_OPT_OUT = True
+AI_OPT_OUT_TOKENS = {"noai", "noimageai", "noindex"}
+
+
+# -------------------------------------------------------------------
+# robots.txt handling (via stdlib robotparser -- correctly handles
+# Allow/Disallow precedence, wildcards, and per-agent groups)
+# -------------------------------------------------------------------
+class RobotsCache:
+    def __init__(self):
+        self._cache: Dict[str, Tuple[RobotFileParser, float]] = {}
+        self._lock = asyncio.Lock()
+
+    async def get(self, domain: str, session: aiohttp.ClientSession):
+        async with self._lock:
+            if domain in self._cache:
+                return self._cache[domain]
+
+        robots_url = f"https://{domain}/robots.txt"
+        rp = RobotFileParser()
+        rp.set_url(robots_url)
+
+        try:
+            async with session.get(robots_url, timeout=5) as resp:
+                if resp.status == 200:
+                    text = await resp.text()
+                    rp.parse(text.splitlines())
+                else:
+                    # No robots.txt (or inaccessible) -- per convention, treat as
+                    # "no restrictions" rather than failing closed or open blindly.
+                    rp.parse([])
+        except Exception:
+            rp.parse([])
+
+        delay = rp.crawl_delay(USER_AGENT) or rp.crawl_delay("*") or DEFAULT_CRAWL_DELAY
+
+        async with self._lock:
+            self._cache[domain] = (rp, delay)
+        return self._cache[domain]
+
+
+robots_cache = RobotsCache()
+
+
+# -------------------------------------------------------------------
+# Per-domain throttling: serializes all requests (incl. retries) to the
+# same host so crawl-delay is actually honored, even with many concurrent
+# tasks in flight for other domains.
+# -------------------------------------------------------------------
+class DomainThrottle:
+    def __init__(self):
+        self._locks: Dict[str, asyncio.Lock] = {}
+        self._registry_lock = asyncio.Lock()
+
+    async def get_lock(self, domain: str) -> asyncio.Lock:
+        async with self._registry_lock:
+            if domain not in self._locks:
+                self._locks[domain] = asyncio.Lock()
+            return self._locks[domain]
+
+
+domain_throttle = DomainThrottle()
+
+
+# -------------------------------------------------------------------
+# License detection
+# -------------------------------------------------------------------
+def detect_license(soup: BeautifulSoup, url: str) -> Tuple[Optional[str], bool]:
+    """Returns (license_string, verified). verified=True means an explicit
+    machine-readable signal was found (meta/link tag or known-domain rule),
+    as opposed to a heuristic guess from body text."""
+
+    meta = soup.find("meta", attrs={"name": "dcterms.license"})
+    if meta and meta.get("content"):
+        return meta["content"], True
+
+    meta = soup.find("meta", attrs={"property": "cc:license"})
+    if meta and meta.get("content"):
+        return meta["content"], True
+
+    link = soup.find("link", rel="license")
+    if link and link.get("href"):
+        return link["href"], True
+
+    if "wikipedia.org" in url:
+        return "https://creativecommons.org/licenses/by-sa/4.0/", True
+
+    # Project Gutenberg: every ebook page carries their standard license
+    # stating the underlying text is public domain in the US (their own
+    # header/footer boilerplate and trademark terms are not the content
+    # itself). Treated as verified rather than relying on the generic
+    # "public domain" body-text heuristic.
+    if "gutenberg.org" in url:
+        return "Public Domain (Project Gutenberg)", True
+
+    body = soup.get_text().lower()
+    if "creative commons attribution" in body:
+        return "CC-BY (heuristic)", False
+    if "public domain" in body:
+        return "Public Domain (heuristic)", False
+
+    return None, False
+
+
+def is_license_allowed(license_str: Optional[str], verified: bool) -> bool:
+    if not license_str:
+        return False
+    if not verified and not ALLOW_HEURISTIC_LICENSE:
+        return False
+
+    license_lower = license_str.lower()
+
+    # Disqualify first: catches "cc-by-sa", "cc-by-nc", "cc-by-nd" etc. even
+    # though they contain "cc-by" / the by/ URL prefix as a substring.
+    if any(bad in license_lower for bad in DISQUALIFYING_PHRASES):
+        return False
+
+    if any(allowed in license_lower for allowed in ALLOWED_LICENSES):
+        return True
+    if any(prefix in license_lower for prefix in ALLOWED_LICENSE_URL_PREFIXES):
+        return True
+    if any(phrase in license_lower for phrase in ALLOWED_LICENSE_EXACT_PHRASES):
+        return True
+
+    return False
+
+
+# -------------------------------------------------------------------
+# AI opt-out / indexing signals
+# -------------------------------------------------------------------
+def has_ai_opt_out(soup: BeautifulSoup, headers) -> bool:
+    if not RESPECT_AI_OPT_OUT:
+        return False
+
+    header_value = headers.get("X-Robots-Tag", "").lower()
+    if any(tok in header_value for tok in AI_OPT_OUT_TOKENS):
+        return True
+
+    meta = soup.find("meta", attrs={"name": "robots"})
+    if meta and meta.get("content"):
+        content = meta["content"].lower()
+        if any(tok in content for tok in AI_OPT_OUT_TOKENS):
+            return True
+
+    return False
+
+
+# -------------------------------------------------------------------
+# Text extraction
+# -------------------------------------------------------------------
+def extract_main_text(soup: BeautifulSoup) -> Optional[str]:
+    for tag in soup(
+        ["script", "style", "nav", "footer", "header", "aside", "form", "noscript"]
+    ):
+        tag.decompose()
+
+    main = (
+        soup.find("main")
+        or soup.find("article")
+        or soup.find("div", class_="content")
+        or soup.find("div", id="content")
+        or soup.find("body")
+    )
+
+    if not main:
+        return None
+
+    parts = []
+    for elem in main.find_all(["p", "h1", "h2", "h3", "h4", "li"]):
+        text = elem.get_text(strip=True)
+        if len(text) > 30:
+            parts.append(text)
+
+    if not parts:
+        return None
+
+    full = "\n\n".join(parts)
+    full = "\n".join(line.strip() for line in full.splitlines() if line.strip())
+    return full if len(full) > 200 else None
+
+
+def content_hash(text: str) -> str:
+    normalized = " ".join(text.split()).lower()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+# -------------------------------------------------------------------
+# Write one record as a JSON line (append)
+# -------------------------------------------------------------------
+def append_jsonl(filepath: str, record: dict):
+    with open(filepath, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+# -------------------------------------------------------------------
+# Asynchronous scraper
+# -------------------------------------------------------------------
+async def scrape_one(
+    session: aiohttp.ClientSession,
+    url: str,
+    semaphore: asyncio.Semaphore,
+    seen_hashes: set,
+    hashes_lock: asyncio.Lock,
+) -> Optional[dict]:
+    parsed = urlparse(url)
+    domain = parsed.netloc
+
+    rp, delay = await robots_cache.get(domain, session)
+    if not rp.can_fetch(USER_AGENT, url):
+        print(f"⛔ {url} – disallowed by robots.txt")
+        return None
+
+    domain_lock = await domain_throttle.get_lock(domain)
+
+    async with semaphore, domain_lock:
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                async with session.get(
+                    url, timeout=REQUEST_TIMEOUT, headers={"User-Agent": USER_AGENT}
+                ) as resp:
+                    if resp.status == 429:
+                        retry_after = resp.headers.get("Retry-After")
+                        wait = (
+                            float(retry_after)
+                            if retry_after
+                            else RETRY_BACKOFF**attempt
+                        )
+                        print(f"⏳ {url} – 429 rate limited, waiting {wait}s")
+                        await asyncio.sleep(wait)
+                        continue
+
+                    if resp.status != 200:
+                        print(
+                            f"⚠️ {url} – HTTP {resp.status} (attempt {attempt}/{MAX_RETRIES})"
+                        )
+                        if attempt < MAX_RETRIES:
+                            await asyncio.sleep(RETRY_BACKOFF**attempt)
+                        continue
+
+                    content_type = resp.headers.get("Content-Type", "")
+                    if (
+                        "text/html" not in content_type
+                        and "application/xhtml" not in content_type
+                    ):
+                        print(
+                            f"🚫 {url} – non-HTML content-type: {content_type or 'unknown'}"
+                        )
+                        return None
+
+                    content_length = resp.headers.get("Content-Length")
+                    if content_length and int(content_length) > MAX_CONTENT_BYTES:
+                        print(
+                            f"🚫 {url} – too large ({content_length} bytes), skipping"
+                        )
+                        return None
+
+                    html = await resp.text()
+                    if len(html) > MAX_CONTENT_BYTES:
+                        html = html[:MAX_CONTENT_BYTES]
+
+                    soup = BeautifulSoup(html, "html.parser")
+
+                    if has_ai_opt_out(soup, resp.headers):
+                        print(f"🚫 {url} – AI/indexing opt-out signal present")
+                        return None
+
+                    lic, verified = detect_license(soup, url)
+                    if FILTER_BY_LICENSE and not is_license_allowed(lic, verified):
+                        print(
+                            f"🚫 {url} – license not allowed: {lic} (verified={verified})"
+                        )
+                        return None
+
+                    text = extract_main_text(soup)
+                    if not text:
+                        print(f"📭 {url} – no text extracted")
+                        return None
+
+                    h = content_hash(text)
+                    async with hashes_lock:
+                        if h in seen_hashes:
+                            print(f"♻️ {url} – duplicate content, skipping")
+                            return None
+                        seen_hashes.add(h)
+
+                    print(
+                        f"✅ {url} – {len(text)} chars, license: {lic} (verified={verified})"
+                    )
+                    return {
+                        "url": url,
+                        "license": lic,
+                        "license_verified": verified,
+                        "fetched_at": time.strftime(
+                            "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                        ),
+                        "content_hash": h,
+                        "text": text,
+                    }
+
+            except asyncio.TimeoutError:
+                print(f"⌛ {url} – timeout ({attempt}/{MAX_RETRIES})")
+            except Exception as e:
+                print(f"❌ {url} – {type(e).__name__}: {e}")
+
+            if attempt < MAX_RETRIES:
+                await asyncio.sleep(RETRY_BACKOFF**attempt)
+
+        print(f"💀 {url} – failed after {MAX_RETRIES} attempts")
+        return None
+
+
+# -------------------------------------------------------------------
+# Main
+# -------------------------------------------------------------------
+async def scrape_urls(urls: List[str], output_file: str):
+    seen = set()
+    unique = []
+    for u in urls:
+        if u not in seen:
+            seen.add(u)
+            unique.append(u)
+
+    print(
+        f"📋 Starting {len(unique)} unique URLs (max concurrency={MAX_CONCURRENT}, "
+        f"per-domain requests serialized to respect crawl-delay)"
+    )
+
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+    seen_hashes: set = set()
+    hashes_lock = asyncio.Lock()
+
+    # Start with a clean file
+    open(output_file, "w", encoding="utf-8").close()
+
+    connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT * 2)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        tasks = [
+            scrape_one(session, url, semaphore, seen_hashes, hashes_lock)
+            for url in unique
+        ]
+        results = await asyncio.gather(*tasks)
+
+    count = 0
+    for res in results:
+        if res is not None:
+            append_jsonl(output_file, res)
+            count += 1
+
+    print(
+        f"\n🎉 Done. {count} documents saved to '{output_file}' (JSONL, one record per line)."
+    )
+
+
+def read_urls_from_file(filepath: str) -> List[str]:
+    with open(filepath, "r", encoding="utf-8") as f:
+        return [line.strip() for line in f if line.strip() and not line.startswith("#")]
+
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) != 2:
+        print("Usage: python scraper.py urls.txt")
+        sys.exit(1)
+
+    url_file = sys.argv[1]
+    if not os.path.exists(url_file):
+        print(f"File not found: {url_file}")
+        sys.exit(1)
+
+    urls = read_urls_from_file(url_file)
+    if not urls:
+        print("No URLs found.")
+        sys.exit(1)
+
+    asyncio.run(scrape_urls(urls, OUTPUT_FILE))
+
+    # Tokenize the entire dataset (only if file exists and has content)
+    try:
+        import tiktoken
+
+        total_tokens = 0
+        tokenizer = tiktoken.get_encoding(TOKENIZER_NAME)
+        with open(OUTPUT_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                record = json.loads(line)
+                total_tokens += len(tokenizer.encode(record["text"]))
+
+        if total_tokens:
+            print(
+                f"Your dataset has {total_tokens} tokens (using {TOKENIZER_NAME} tokenizer)."
+            )
+        else:
+            print("The output file is empty. No tokens to count.")
+    except FileNotFoundError:
+        print(f"File '{OUTPUT_FILE}' not found. No data scraped successfully.")

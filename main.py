@@ -1,0 +1,168 @@
+from pprint import pprint
+from pathlib import Path
+import json
+
+from scripts.evaluate import (
+    generate_text_with_temperature_topk,
+    text_to_token_ids,
+    token_ids_to_text,
+)
+from configs.model_configs import get_gpt_configs, GPT_configs
+from src.data.dataset import create_dataloader, load_text_data
+from src.training.train import train_model
+from src.models.gpt_model import GPT_model
+from src.utils.save_model_hf import save_model_hf
+from src.utils.load_model import load_model_if_exists
+
+import torch
+import tiktoken
+import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
+from torchinfo import summary
+
+
+def main():
+    print("Welcome to the gpt2 model pipeline! we are loading stuff please wait ...")
+    cfg = get_gpt_configs()
+    model = GPT_model(cfg)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    print(f"Current device is {device}.")
+
+    while True:
+        print(
+            "Chose what to do: (q = quit, t = train, g = generate, i = model and configs info)"
+        )
+        inp = input().lower()
+
+        if inp == "q":
+            print("Bye!")
+            return 0
+
+        elif inp == "t":
+            if not load_model_if_exists(cfg, model, device):
+                print("start train process ...")
+                torch.manual_seed(42)
+                train(model, cfg)
+                print("training process finished, Now you can use model.")
+                return 0
+            print("Model is already trained, we loaded it.")
+
+        elif inp == "g":
+            if load_model_if_exists(cfg, model, device):
+                prompt = input("Enter you're prompt: ")
+                generate(model, cfg, prompt, 42)
+                return 0
+
+            print("Model not found, try to train it first.")
+
+        elif inp == "i":
+            print("Models configuration:")
+            pprint(cfg.__dict__)
+            print("Models architecture:")
+            summary(model)
+
+        else:
+            print("unknown input, try again.")
+
+
+def generate(model, cfg: GPT_configs, prompt: str, seed=None):
+    if seed is not None:
+        torch.manual_seed(seed)
+
+    tokenizer = tiktoken.get_encoding(cfg.ticktoken_tokenizer)
+    generated_ids = generate_text_with_temperature_topk(
+        model=model,
+        idx=text_to_token_ids(text=prompt, tokenizer=tokenizer),
+        context_size=cfg.context_length,
+        max_new_tokens=25,
+        top_k=90,
+        temperature=0.7,
+    )
+
+    print(token_ids_to_text(generated_ids, tokenizer))
+
+
+def train(model: GPT_model, cfg: GPT_configs):
+    # ==== LOAD TEXT AND SPLIT IT ====
+    text = load_text_data(cfg)
+    train_ratio = 0.80
+    split_idx = int(train_ratio * len(text))
+    train_data = text[:split_idx]
+    val_data = text[split_idx:]
+
+    # ==== TOKENIZE DATASET AND CREATE VAL AND TRAIN LOADERS ====
+    tokenizer = tiktoken.get_encoding(cfg.ticktoken_tokenizer)
+    train_loader = create_dataloader(
+        train_data,
+        batch_size=3,
+        max_length=cfg.context_length,
+        stride=cfg.context_length,
+        drop_last=True,
+        shuffle=True,
+        num_workers=0,
+    )
+    val_loader = create_dataloader(
+        val_data,
+        batch_size=3,
+        max_length=cfg.context_length,
+        stride=cfg.context_length,
+        drop_last=False,
+        shuffle=False,
+        num_workers=0,
+    )
+
+    # ==== SETUP EPOCHS DEVICE AND OPTIMIZER ====
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model.to(device=device, dtype=torch.bfloat16)
+    optim = torch.optim.AdamW(params=model.parameters(), lr=5e-4, weight_decay=0.1)
+
+    # ==== TRAIN MODEL ====
+    train_losses, val_losses, tokens_seen = train_model(
+        model,
+        train_loader,
+        val_loader,
+        cfg.epochs,
+        optim,
+        device,
+        eval_freq=5,
+        eval_iter=5,
+        start_context="Hello I am ",
+        tokenizer=tokenizer,
+        create_checkpoints=cfg.create_checkpoints,
+        use_checkpoints=cfg.use_checkpoints,
+        checkpoint_freq=cfg.checkpoint_freq,
+        checkpoint_path=cfg.checkpoints_path,
+    )
+
+    # ==== SAVE MODEL WITH CONFIGS ====
+    folder_name = Path(cfg.save_model_path)
+    folder_name.mkdir(exist_ok=True)
+    torch.save(model.state_dict(), (folder_name / "pytorch_model.bin"))
+
+    with open(folder_name / "configs.json", "w") as f:
+        json.dump(cfg.__dict__, f, indent=4)
+
+    save_model_hf(cfg)
+
+    # ==== PLOT MODEL LOSSES ====
+    plot_losses(cfg.epochs, tokens_seen, train_losses, val_losses)
+
+
+def plot_losses(epochs_seen, tokens_seen, train_losses, val_losses):
+    fig, ax1 = plt.subplots(figsize=(5, 3))
+    ax1.plot(epochs_seen, train_losses, label="Training loss")
+    ax1.plot(epochs_seen, val_losses, linestyle="-.", label="Validation loss")
+    ax1.set_xlabel("Epochs")
+    ax1.set_ylabel("Loss")
+    ax1.legend(loc="upper right")
+    ax1.xaxis.set_major_locator(MaxNLocator(integer=True))
+    ax2 = ax1.twiny()
+    ax2.plot(tokens_seen, train_losses, alpha=0)
+    ax2.set_xlabel("Tokens seen")
+    fig.tight_layout()
+
+    fig.savefig("train-val-loss.png")
+
+
+main()
