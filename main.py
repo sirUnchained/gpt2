@@ -21,12 +21,66 @@ from matplotlib.ticker import MaxNLocator
 from torchinfo import summary
 
 
+import sys
+
+
 def main():
+    # --- Parse command-line args (simple, no argparse overhead) ---
+    args = sys.argv[1:]  # Skip script name
+
+    if "-t" in args:
+        print("Welcome to the gpt2 model pipeline! loading stuff please wait ...")
+        cfg = get_gpt_configs()
+        model = GPT_model(cfg)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"Current device is {device}.")
+
+        if not load_model_if_exists(cfg, model, device):
+            print("start train process ...")
+            torch.manual_seed(42)
+            train(model, cfg)
+            print("training process finished, Now you can use model.")
+        else:
+            print("Model is already trained, we loaded it.")
+        return 0
+
+    if "-g" in args:
+        print("Welcome to the gpt2 model pipeline! loading stuff please wait ...")
+        cfg = get_gpt_configs()
+        model = GPT_model(cfg)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"Current device is {device}.")
+
+        # Check if a prompt was passed with -p, else ask interactively
+        if "-p" in args:
+            prompt = args[args.index("-p") + 1]
+        else:
+            prompt = input("Enter your prompt: ")
+
+        if load_model_if_exists(cfg, model, device):
+            generate(model, cfg, prompt, 42)
+        else:
+            print("Model not found, try to train it first.")
+        return 0
+
+    if "-i" in args:
+        print("Welcome to the gpt2 model pipeline! loading stuff please wait ...")
+        cfg = get_gpt_configs()
+        model = GPT_model(cfg)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"Current device is {device}.")
+
+        print("Models configuration:")
+        pprint(cfg.__dict__)
+        print("Models architecture:")
+        summary(model)
+        return 0
+
+    # --- Original Interactive Loop (Unchanged) ---
     print("Welcome to the gpt2 model pipeline! we are loading stuff please wait ...")
     cfg = get_gpt_configs()
     model = GPT_model(cfg)
     device = "cuda" if torch.cuda.is_available() else "cpu"
-
     print(f"Current device is {device}.")
 
     while True:
@@ -50,10 +104,9 @@ def main():
 
         elif inp == "g":
             if load_model_if_exists(cfg, model, device):
-                prompt = input("Enter you're prompt: ")
+                prompt = input("Enter your prompt: ")
                 generate(model, cfg, prompt, 42)
                 return 0
-
             print("Model not found, try to train it first.")
 
         elif inp == "i":
