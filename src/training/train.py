@@ -1,4 +1,5 @@
 import os
+import math
 
 import torch
 import tiktoken
@@ -107,7 +108,7 @@ def train_model(
             tokens_seen += input_batch.numel()
             global_step += 1
 
-            learning_rate_change(global_step, total_steps, 1000, optimizer)
+            learning_rate_change(global_step, total_steps, 0.2, optimizer)
 
             if global_step % eval_freq == 0:
                 train_loss, val_loss = evaluate_model(
@@ -236,7 +237,7 @@ def generate_and_print_sample(model, tokenizer, device, start_context):
 def learning_rate_change(
     global_step: int,
     total_training_steps: int,
-    warmup_steps: int,
+    warmup_percent: float,
     optimizer: torch.optim.Optimizer,
     initial_lr=1e-5,
     peak_lr=3e-4,
@@ -244,13 +245,13 @@ def learning_rate_change(
     """
     ## Update the optimizer's learning rate using a warmup then cosine decay schedule.
 
-    During the warmup phase (first `warmup_steps` fraction of total steps), the learning rate increases linearly from `initial_lr` to `peak_lr`.
+    During the warmup phase (first `warmup_percent` fraction of total steps), the learning rate increases linearly from `initial_lr` to `peak_lr`.
     After warmup, the learning rate decays following a cosine curve from `peak_lr` down to `min_lr = 0.1 * initial_lr` over the remaining steps.
 
     Args:
         global_step (int): Current training step (0‑based).
         total_training_steps (int): Total number of training steps.
-        warmup_steps (float): Fraction of total steps used for warmup (e.g., 0.1 for 10%).
+        warmup_percent (float): Fraction of total steps used for warmup (e.g., 0.1 for 10%).
         optimizer (torch.optim.Optimizer): Optimizer whose learning rate will be updated.
         initial_lr (float, optional): Starting learning rate before warmup. Default 1e-5.
         peak_lr (float, optional): Maximum learning rate reached at the end of warmup. Default 3e-4.
@@ -259,18 +260,18 @@ def learning_rate_change(
         float: The updated learning rate value (from the first parameter group).
     """
 
-    warmup_steps = int(warmup_steps * total_training_steps)
+    warmup_steps = int(warmup_percent * total_training_steps)
     lr_increment = (peak_lr - initial_lr) / warmup_steps if warmup_steps > 0 else 0
     min_lr = 0.1 * initial_lr
 
     if global_step < warmup_steps:
+        # If the global step is less than warmup steps so we increase lr
         lr = initial_lr + global_step * lr_increment
     else:
+        # If the global step is greater or equal to warmup steps so we start cosine decay
         progress = (global_step - warmup_steps) / (total_training_steps - warmup_steps)
         progress = min(progress, 1.0)  # guard against overshoot
-        lr = min_lr + (peak_lr - min_lr) * 0.5 * (
-            1 + torch.cos(torch.tensor(torch.pi * progress))
-        )
+        lr = min_lr + (peak_lr - min_lr) * 0.5 * (1 + math.cos((math.pi * progress)))
 
     for param_group in optimizer.param_groups:
         param_group["lr"] = lr
