@@ -25,12 +25,13 @@ def save_model_hf(cfg: GPT_configs):
         None
     """
 
-    folder_name = cfg.save_model_path
+    folder_checkpoints_name = cfg.checkpoints_path
+    folder_weights_name = cfg.save_model_path
     model_weights_name = "pytorch_model.bin"
     config_file_name = "configs.json"
 
-    model_weights_path = os.path.join(folder_name, model_weights_name)
-    config_file_path = os.path.join(folder_name, config_file_name)
+    model_weights_path = os.path.join(folder_weights_name, model_weights_name)
+    config_file_path = os.path.join(folder_weights_name, config_file_name)
 
     if not os.path.exists(model_weights_path):
         raise FileNotFoundError(f"Model weights not found at {model_weights_path}")
@@ -61,6 +62,15 @@ def save_model_hf(cfg: GPT_configs):
         repo_id=repo_id,
         commit_message="Add model configuration",
     )
+
+    if cfg.create_checkpoints:
+        print(f"Uploading model checkpoints ({folder_checkpoints_name})...")
+        api.upload_folder(
+            folder_path=folder_checkpoints_name,
+            repo_id=repo_id,
+            repo_type="model",
+            commit_message="Add model checkpoints",
+        )
 
     print(
         f"Successfully pushed model to Hugging Face Hub: https://huggingface.co/{repo_id}"

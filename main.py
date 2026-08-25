@@ -76,7 +76,7 @@ def main():
         summary(model)
         return 0
 
-    # --- Original Interactive Loop (Unchanged) ---
+    # --- Original Interactive Loop ---
     print("Welcome to the gpt2 model pipeline! we are loading stuff please wait ...")
     cfg = get_gpt_configs()
     model = GPT_model(cfg)
