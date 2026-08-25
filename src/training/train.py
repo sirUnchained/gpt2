@@ -265,13 +265,18 @@ def learning_rate_change(
     min_lr = 0.1 * initial_lr
 
     if global_step < warmup_steps:
-        # If the global step is less than warmup steps so we increase lr
-        lr = initial_lr + global_step * lr_increment
+        # Linear increase
+        progress = global_step / max(warmup_steps, 1)
+        lr = initial_lr + progress * lr_increment
     else:
-        # If the global step is greater or equal to warmup steps so we start cosine decay
-        progress = (global_step - warmup_steps) / (total_training_steps - warmup_steps)
+        # Cosine decay
+        decay_steps = total_training_steps - warmup_steps
+        progress = (global_step - warmup_steps) / decay_steps
+
         progress = min(progress, 1.0)  # guard against overshoot
-        lr = min_lr + (peak_lr - min_lr) * 0.5 * (1 + math.cos((math.pi * progress)))
+
+        cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
+        lr = min_lr + (peak_lr - min_lr) * cosine_decay
 
     for param_group in optimizer.param_groups:
         param_group["lr"] = lr
