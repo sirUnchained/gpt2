@@ -163,7 +163,7 @@ def train(model: GPT_model, cfg: GPT_configs):
         device,
         eval_freq=5,
         eval_iter=cfg.batch_size,
-        start_context="Hello I am ",
+        start_context="Hello I am",
         tokenizer=tokenizer,
         create_checkpoints=cfg.create_checkpoints,
         use_checkpoints=cfg.use_checkpoints,
