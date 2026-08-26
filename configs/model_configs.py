@@ -48,14 +48,14 @@ def get_gpt_configs():
 
     config.checkpoint_freq = int(os.getenv("CHECKPOINT_FREQ", config.checkpoint_freq))
     config.create_checkpoints = os.getenv(
-        "CREAET_CHECKPOINTS", str(config.qkv_bias)
+        "CREAET_CHECKPOINTS", str(config.create_checkpoints)
     ).lower() in (
         "true",
         "1",
         "yes",
     )
     config.use_checkpoints = os.getenv(
-        "USE_CHECKPOINTS", str(config.qkv_bias)
+        "USE_CHECKPOINTS", str(config.use_checkpoints)
     ).lower() in (
         "true",
         "1",

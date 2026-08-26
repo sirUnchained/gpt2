@@ -61,7 +61,7 @@ class MultiHeadAttention(nn.Module):
         self.register_buffer(
             "mask", torch.triu(torch.ones(context_length, context_length), diagonal=1)
         )
-        self.w_proj = nn.Linear(in_features=d_in, out_features=d_out, bias=qkv_bias)
+        self.w_proj = nn.Linear(in_features=d_out, out_features=d_out, bias=qkv_bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
 

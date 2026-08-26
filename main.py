@@ -28,13 +28,13 @@ def main():
     # --- Parse command-line args (simple, no argparse overhead) ---
     args = sys.argv[1:]  # Skip script name
 
-    if "-t" in args:
-        print("Welcome to the gpt2 model pipeline! loading stuff please wait ...")
-        cfg = get_gpt_configs()
-        model = GPT_model(cfg)
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"Current device is {device}.")
+    print("Welcome to the gpt2 model pipeline! loading stuff please wait ...")
+    cfg = get_gpt_configs()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = GPT_model(cfg).to(device)
+    print(f"Current device is {device}.")
 
+    if "-t" in args:
         if not load_model_if_exists(cfg, model, device):
             print("start train process ...")
             torch.manual_seed(42)
@@ -45,12 +45,6 @@ def main():
         return 0
 
     if "-g" in args:
-        print("Welcome to the gpt2 model pipeline! loading stuff please wait ...")
-        cfg = get_gpt_configs()
-        model = GPT_model(cfg)
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"Current device is {device}.")
-
         # Check if a prompt was passed with -p, else ask interactively
         if "-p" in args:
             prompt = args[args.index("-p") + 1]
@@ -64,12 +58,6 @@ def main():
         return 0
 
     if "-i" in args:
-        print("Welcome to the gpt2 model pipeline! loading stuff please wait ...")
-        cfg = get_gpt_configs()
-        model = GPT_model(cfg)
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"Current device is {device}.")
-
         print("Models configuration:")
         pprint(cfg.__dict__)
         print("Models architecture:")
@@ -77,12 +65,6 @@ def main():
         return 0
 
     # --- Original Interactive Loop ---
-    print("Welcome to the gpt2 model pipeline! we are loading stuff please wait ...")
-    cfg = get_gpt_configs()
-    model = GPT_model(cfg)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Current device is {device}.")
-
     while True:
         print(
             "Chose what to do: (q = quit, t = train, g = generate, i = model and configs info)"
@@ -123,6 +105,7 @@ def generate(model, cfg: GPT_configs, prompt: str, seed=None):
     if seed is not None:
         torch.manual_seed(seed)
 
+    model.eval()
     tokenizer = tiktoken.get_encoding(cfg.ticktoken_tokenizer)
     generated_ids = generate_text_with_temperature_topk(
         model=model,
@@ -148,7 +131,7 @@ def train(model: GPT_model, cfg: GPT_configs):
     tokenizer = tiktoken.get_encoding(cfg.ticktoken_tokenizer)
     train_loader = create_dataloader(
         train_data,
-        batch_size=3,
+        batch_size=5,
         max_length=cfg.context_length,
         stride=cfg.context_length,
         drop_last=True,
@@ -157,7 +140,7 @@ def train(model: GPT_model, cfg: GPT_configs):
     )
     val_loader = create_dataloader(
         val_data,
-        batch_size=3,
+        batch_size=5,
         max_length=cfg.context_length,
         stride=cfg.context_length,
         drop_last=False,

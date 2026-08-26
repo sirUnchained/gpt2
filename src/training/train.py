@@ -199,8 +199,8 @@ def evaluate_model(model, train_dataloader, val_dataloader, device, eval_iter):
     """
     model.eval()
     with torch.no_grad():
-        train_loss = calc_loader_cost(train_dataloader, model, device, None)
-        val_loss = calc_loader_cost(val_dataloader, model, device, None)
+        train_loss = calc_loader_cost(train_dataloader, model, device, eval_iter)
+        val_loss = calc_loader_cost(val_dataloader, model, device, eval_iter)
     model.train()
     return train_loss, val_loss
 
