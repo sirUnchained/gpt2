@@ -108,7 +108,7 @@ def train_model(
             tokens_seen += input_batch.numel()
             global_step += 1
 
-            lr = learning_rate_change(global_step, total_steps, 0.2, optimizer)
+            # lr = learning_rate_change(global_step, total_steps, 0.2, optimizer)
 
             if global_step % eval_freq == 0:
                 train_loss, val_loss = evaluate_model(
@@ -123,7 +123,7 @@ def train_model(
                     f"Epoch {epoch+1} (Step {global_step:06d}): "
                     f"Train loss {train_loss:.3f}, "
                     f"Val loss {val_loss:.3f}, "
-                    f"LR {lr:.3e}"
+                    # f"LR {lr:.3e}"
                 )
 
             # --- Periodic checkpoint save ---
