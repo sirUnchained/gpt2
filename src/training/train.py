@@ -2,32 +2,76 @@ import os
 import math
 
 import torch
-import tiktoken
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 
-from scripts.evaluate import generate_text, text_to_token_ids, token_ids_to_text
-from configs.model_configs import GPT_configs
-from src.data.dataset import create_dataloader
-from src.training.loss import calc_loader_cost, calc_batch_cost
-from src.models.gpt_model import GPT_model
-from src.data.dataset import load_text_data
-from src.utils.ckeckpoints import load_checkpoint, save_checkpoint
+from scripts.evaluate import (
+    generate_text,
+    text_to_token_ids,
+    token_ids_to_text,
+)
+
+from src.training.loss import (
+    calc_batch_cost,
+)
+
+from src.utils.ckeckpoints import (
+    load_checkpoint,
+    save_checkpoint,
+)
+
+# ============================================================
+# Distributed utilities
+# ============================================================
+
+
+def is_distributed():
+    return dist.is_available() and dist.is_initialized()
+
+
+def get_rank():
+    if not is_distributed():
+        return 0
+
+    return dist.get_rank()
+
+
+def is_main_process():
+    return get_rank() == 0
+
+
+def unwrap_model(model):
+    """
+    Return the underlying model when using DDP.
+    """
+
+    if isinstance(model, DDP):
+        return model.module
+
+    return model
+
+
+# ============================================================
+# Training
+# ============================================================
 
 
 def train_model(
     model,
-    train_dataloader: torch.utils.data.DataLoader,
-    val_dataloader: torch.utils.data.DataLoader,
-    num_epochs: int,
-    optimizer: torch.optim.Optimizer,
+    train_dataloader,
+    val_dataloader,
+    num_epochs,
+    optimizer,
     device,
     eval_freq,
     eval_iter,
     start_context,
     tokenizer,
-    checkpoint_path: str,
-    checkpoint_freq: int = 1000,  # save every N global steps, in addition to per-epoch
+    checkpoint_path,
+    checkpoint_freq=1000,
     use_checkpoints=False,
     create_checkpoints=False,
+    distributed=False,
 ):
     """
     Trains a language model over multiple epochs with periodic evaluation and checkpointing.
@@ -62,6 +106,7 @@ def train_model(
                                           `{checkpoint_path}/latest.pt`. Defaults to False.
         create_checkpoints (bool, optional): If True, save periodic and end-of-epoch
                                               checkpoints to `checkpoint_path`. Defaults to False.
+        distributed (bool): If True, we'll use distributed gpus.
 
     Returns:
         tuple: A 3-element tuple containing:
@@ -75,67 +120,277 @@ def train_model(
         `learning_rate_change`, which is expected to be defined in the outer scope.
     """
 
-    train_losses, val_losses, track_tokens_seen = [], [], []
-    tokens_seen, global_step = 0, -1
-    total_steps = len(train_dataloader) * num_epochs
+    train_losses = []
+    val_losses = []
+    track_tokens_seen = []
+
+    tokens_seen = 0
+    global_step = -1
     start_epoch = 0
 
-    latest_ckpt_path = os.path.join(checkpoint_path, "latest.pt")
+    total_steps = len(train_dataloader) * num_epochs
 
-    # --- Resume from checkpoint if requested and available ---
+    latest_ckpt_path = os.path.join(
+        checkpoint_path,
+        "latest.pt",
+    )
+
+    # --------------------------------------------------------
+    # Resume from checkpoint if requested and available
+    # --------------------------------------------------------
+
     if use_checkpoints and os.path.exists(latest_ckpt_path):
-        checkpoint = load_checkpoint(latest_ckpt_path, model, optimizer, device)
+        if is_main_process():
+            print(f"Loading checkpoint: " f"{latest_ckpt_path}")
+
+        # Load checkpoint into the raw model.
+        # This avoids DDP's "module." state_dict issue.
+        raw_model = unwrap_model(model)
+
+        checkpoint = load_checkpoint(
+            latest_ckpt_path,
+            raw_model,
+            optimizer,
+            device,
+        )
+
         start_epoch = checkpoint["epoch"]
         global_step = checkpoint["global_step"]
         tokens_seen = checkpoint["tokens_seen"]
+
         train_losses = checkpoint["train_losses"]
+
         val_losses = checkpoint["val_losses"]
+
         track_tokens_seen = checkpoint["track_tokens_seen"]
-    elif use_checkpoints:
+
+        if is_main_process():
+            print(
+                f"Resuming from epoch "
+                f"{start_epoch}, "
+                f"global step "
+                f"{global_step}"
+            )
+
+    elif use_checkpoints and is_main_process():
+
         print(
-            f"`use_checkpoints` is true but no checkpoint found at {latest_ckpt_path}, starting fresh."
+            "Checkpoint requested but no "
+            "checkpoint was found. "
+            "Starting from scratch."
         )
 
-    for epoch in range(start_epoch, num_epochs):
+    # --------------------------------------------------------
+    # Wrap model in DDP
+    # --------------------------------------------------------
+
+    if distributed:
+
+        model = DDP(
+            model,
+            device_ids=[torch.cuda.current_device()],
+            output_device=torch.cuda.current_device(),
+        )
+
+    # --------------------------------------------------------
+    # Synchronize all ranks
+    # --------------------------------------------------------
+
+    if is_distributed():
+        dist.barrier()
+
+    # --------------------------------------------------------
+    # Epoch loop
+    # --------------------------------------------------------
+
+    for epoch in range(
+        start_epoch,
+        num_epochs,
+    ):
+
         model.train()
 
+        # IMPORTANT:
+        # DistributedSampler needs a new seed every epoch.
+        if hasattr(
+            train_dataloader,
+            "sampler",
+        ) and hasattr(
+            train_dataloader.sampler,
+            "set_epoch",
+        ):
+
+            train_dataloader.sampler.set_epoch(epoch)
+
+        if hasattr(
+            val_dataloader,
+            "sampler",
+        ) and hasattr(
+            val_dataloader.sampler,
+            "set_epoch",
+        ):
+
+            val_dataloader.sampler.set_epoch(epoch)
+
+        # ----------------------------------------------------
+        # Batch loop
+        # ----------------------------------------------------
+
         for input_batch, target_batch in train_dataloader:
-            optimizer.zero_grad()
-            loss = calc_batch_cost(input_batch, target_batch, model, device)
+
+            optimizer.zero_grad(set_to_none=True)
+
+            loss = calc_batch_cost(
+                input_batch,
+                target_batch,
+                model,
+                device,
+            )
+
             loss.backward()
+
             optimizer.step()
 
-            tokens_seen += input_batch.numel()
+            # ------------------------------------------------
+            # Counters
+            # ------------------------------------------------
+
+            # In DDP, every rank sees batch_size samples.
+            # We count global tokens only once.
+            local_tokens = input_batch.numel()
+
+            if distributed:
+
+                tokens_tensor = torch.tensor(
+                    local_tokens,
+                    device=device,
+                    dtype=torch.long,
+                )
+
+                dist.all_reduce(
+                    tokens_tensor,
+                    op=dist.ReduceOp.SUM,
+                )
+
+                tokens_seen += tokens_tensor.item()
+
+            else:
+
+                tokens_seen += local_tokens
+
             global_step += 1
 
-            learning_rate_change(global_step, total_steps, 0.2, optimizer)
+            # ------------------------------------------------
+            # Learning rate
+            # ------------------------------------------------
+
+            learning_rate_change(
+                global_step=global_step,
+                total_training_steps=total_steps,
+                warmup_percent=0.20,
+                optimizer=optimizer,
+            )
+
+            # ------------------------------------------------
+            # Evaluation
+            # ------------------------------------------------
 
             if global_step % eval_freq == 0:
+
                 train_loss, val_loss = evaluate_model(
-                    model, train_dataloader, val_dataloader, device, eval_iter
-                )
-                train_losses.append(train_loss.item())  # type: ignore
-                val_losses.append(val_loss.item())  # type: ignore
-
-                track_tokens_seen.append(tokens_seen)
-
-                print(
-                    f"Epoch {epoch+1} (Step {global_step:06d}): "
-                    f"Train loss {train_loss:.3f}, "
-                    f"Val loss {val_loss:.3f}"
+                    model,
+                    train_dataloader,
+                    val_dataloader,
+                    device,
+                    eval_iter,
                 )
 
-            # --- Periodic checkpoint save ---
+                if is_main_process():
+
+                    train_losses.append(train_loss)
+
+                    val_losses.append(val_loss)
+
+                    track_tokens_seen.append(tokens_seen)
+
+                    print(
+                        f"Epoch {epoch + 1} "
+                        f"(Step "
+                        f"{global_step:06d}): "
+                        f"Train loss "
+                        f"{train_loss:.3f}, "
+                        f"Val loss "
+                        f"{val_loss:.3f}, "
+                        f"LR "
+                        f"{optimizer.param_groups[0]['lr']:.3e}"
+                    )
+
+            # ------------------------------------------------
+            # Periodic checkpoint
+            # ------------------------------------------------
+
             if (
                 create_checkpoints
-                and global_step % checkpoint_freq == 0
                 and global_step > 0
+                and global_step % checkpoint_freq == 0
             ):
+
+                if is_distributed():
+                    dist.barrier()
+
+                if is_main_process():
+
+                    save_checkpoint(
+                        latest_ckpt_path,
+                        unwrap_model(model),
+                        optimizer,
+                        epoch,
+                        global_step,
+                        tokens_seen,
+                        train_losses,
+                        val_losses,
+                        track_tokens_seen,
+                    )
+
+                if is_distributed():
+                    dist.barrier()
+
+        # ----------------------------------------------------
+        # End-of-epoch sample
+        # ----------------------------------------------------
+
+        if is_main_process():
+
+            generate_and_print_sample(
+                unwrap_model(model),
+                tokenizer,
+                device,
+                start_context,
+            )
+
+        # ----------------------------------------------------
+        # End-of-epoch checkpoint
+        # ----------------------------------------------------
+
+        if create_checkpoints:
+
+            if is_distributed():
+                dist.barrier()
+
+            if is_main_process():
+
+                raw_model = unwrap_model(model)
+
+                epoch_ckpt_path = os.path.join(
+                    checkpoint_path,
+                    f"epoch_{epoch + 1}.pt",
+                )
+
                 save_checkpoint(
-                    latest_ckpt_path,
-                    model,
+                    epoch_ckpt_path,
+                    raw_model,
                     optimizer,
-                    epoch,
+                    epoch + 1,
                     global_step,
                     tokens_seen,
                     train_losses,
@@ -143,36 +398,31 @@ def train_model(
                     track_tokens_seen,
                 )
 
-        generate_and_print_sample(model, tokenizer, device, start_context)
+                save_checkpoint(
+                    latest_ckpt_path,
+                    raw_model,
+                    optimizer,
+                    epoch + 1,
+                    global_step,
+                    tokens_seen,
+                    train_losses,
+                    val_losses,
+                    track_tokens_seen,
+                )
 
-        # --- End-of-epoch checkpoint save ---
-        if create_checkpoints:
-            epoch_ckpt_path = os.path.join(checkpoint_path, f"epoch_{epoch+1}.pt")
-            save_checkpoint(
-                epoch_ckpt_path,
-                model,
-                optimizer,
-                epoch + 1,
-                global_step,
-                tokens_seen,
-                train_losses,
-                val_losses,
-                track_tokens_seen,
-            )
-            # also update "latest" so resuming picks up here
-            save_checkpoint(
-                latest_ckpt_path,
-                model,
-                optimizer,
-                epoch + 1,
-                global_step,
-                tokens_seen,
-                train_losses,
-                val_losses,
-                track_tokens_seen,
-            )
+            if is_distributed():
+                dist.barrier()
 
-    return train_losses, val_losses, track_tokens_seen
+    return (
+        train_losses,
+        val_losses,
+        track_tokens_seen,
+    )
+
+
+# ============================================================
+# Evaluation
+# ============================================================
 
 
 def evaluate_model(model, train_dataloader, val_dataloader, device, eval_iter):
@@ -198,11 +448,84 @@ def evaluate_model(model, train_dataloader, val_dataloader, device, eval_iter):
                the average cross-entropy loss over the respective dataloader.
     """
     model.eval()
-    with torch.no_grad():
-        train_loss = calc_loader_cost(train_dataloader, model, device, eval_iter)
-        val_loss = calc_loader_cost(val_dataloader, model, device, eval_iter)
+
+    train_loss = evaluate_loader(
+        model,
+        train_dataloader,
+        device,
+        eval_iter,
+    )
+    val_loss = evaluate_loader(
+        model,
+        val_dataloader,
+        device,
+        eval_iter,
+    )
+
     model.train()
     return train_loss, val_loss
+
+
+def evaluate_loader(
+    model,
+    dataloader,
+    device,
+    eval_iter,
+):
+
+    total_loss = torch.zeros(
+        1,
+        device=device,
+        dtype=torch.float64,
+    )
+
+    total_tokens = torch.zeros(
+        1,
+        device=device,
+        dtype=torch.long,
+    )
+
+    with torch.no_grad():
+
+        for batch_idx, (
+            input_batch,
+            target_batch,
+        ) in enumerate(dataloader):
+
+            if eval_iter is not None and batch_idx >= eval_iter:
+                break
+
+            loss = calc_batch_cost(
+                input_batch,
+                target_batch,
+                model,
+                device,
+            )
+
+            num_tokens = target_batch.numel()
+
+            total_loss += loss.detach().double() * num_tokens
+
+            total_tokens += num_tokens
+
+    if is_distributed():
+
+        dist.all_reduce(
+            total_loss,
+            op=dist.ReduceOp.SUM,
+        )
+
+        dist.all_reduce(
+            total_tokens,
+            op=dist.ReduceOp.SUM,
+        )
+
+    return (total_loss / total_tokens.clamp(min=1)).item()
+
+
+# ============================================================
+# Generation
+# ============================================================
 
 
 def generate_and_print_sample(model, tokenizer, device, start_context):
@@ -265,7 +588,7 @@ def learning_rate_change(
     min_lr = 0.1 * initial_lr
 
     if global_step < warmup_steps:
-        # Linear increase
+        # Linear increase (warmup)
         progress = global_step / max(warmup_steps, 1)
         lr = initial_lr + progress * lr_increment
     else:
@@ -281,7 +604,7 @@ def learning_rate_change(
     for param_group in optimizer.param_groups:
         param_group["lr"] = lr
 
-    return optimizer.param_groups[0]["lr"]
+    return lr
 
 
 if __name__ == "__main__":

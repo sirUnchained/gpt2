@@ -1,6 +1,14 @@
 from pprint import pprint
 from pathlib import Path
 import json
+import sys
+import os
+
+import torch
+import tiktoken
+import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
+from torchinfo import summary
 
 from scripts.evaluate import (
     generate_text_with_temperature_topk,
@@ -14,38 +22,107 @@ from src.models.gpt_model import GPT_model
 from src.utils.save_model_hf import save_model_hf
 from src.utils.load_model import load_model_if_exists
 
-import torch
-import tiktoken
-import matplotlib.pyplot as plt
-from matplotlib.ticker import MaxNLocator
-from torchinfo import summary
+
+def is_distributed():
+    return int(os.environ.get("WORLD_SIZE", "1")) > 1
 
 
-import sys
+def get_rank():
+    return int(os.environ.get("RANK", "0"))
+
+
+def is_main_process():
+    return get_rank() == 0
+
+
+def setup_device():
+    """
+    Initialize distributed training if launched with torchrun.
+    Returns:
+        device, local_rank, distributed
+    """
+
+    distributed = is_distributed()
+
+    if distributed:
+        local_rank = int(os.environ["LOCAL_RANK"])
+
+        torch.cuda.set_device(local_rank)
+
+        torch.distributed.init_process_group(backend="nccl")
+
+        device = torch.device(f"cuda:{local_rank}")
+
+    else:
+        local_rank = 0
+
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+        else:
+            device = torch.device("cpu")
+
+    return device, local_rank, distributed
+
+
+def cleanup_distributed():
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
 
 
 def main():
-    # --- Parse command-line args (simple, no argparse overhead) ---
-    args = sys.argv[1:]  # Skip script name
 
-    print("Welcome to the gpt2 model pipeline! loading stuff please wait ...")
+    args = sys.argv[1:]
+
+    device, local_rank, distributed = setup_device()
+
+    if is_main_process():
+        print("Welcome to the GPT model pipeline! " "loading stuff please wait ...")
+
+        if distributed:
+            print(
+                f"Distributed training enabled. "
+                f"World size: {torch.distributed.get_world_size()}"
+            )
+
+        print(f"Current device: {device}")
+
     cfg = get_gpt_configs()
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = GPT_model(cfg).to(device=device)
-    print(f"Current device is {device}.")
+
+    # ---------------------------------------------------------
+    # Training
+    # ---------------------------------------------------------
 
     if "-t" in args:
-        if not load_model_if_exists(cfg, model, device):
-            print("start train process ...")
-            torch.manual_seed(42)
-            train(model, cfg)
-            print("training process finished, Now you can use model.")
-        else:
-            print("Model is already trained, we loaded it.")
+
+        # IMPORTANT:
+        # Every rank creates its own model replica.
+        model = GPT_model(cfg).to(device=device)
+
+        if is_main_process():
+            print("Model created.")
+
+        try:
+            train(
+                model,
+                cfg,
+                device,
+                distributed,
+            )
+        finally:
+            cleanup_distributed()
+
         return 0
 
+    # ---------------------------------------------------------
+    # Generation / inspection
+    # ---------------------------------------------------------
+
+    # These modes should normally be launched without torchrun.
+
+    model = GPT_model(cfg).to(device=device)
+
     if "-g" in args:
-        # Check if a prompt was passed with -p, else ask interactively
+
         if "-p" in args:
             prompt = args[args.index("-p") + 1]
         else:
@@ -55,20 +132,30 @@ def main():
             generate(model, cfg, prompt, 42)
         else:
             print("Model not found, try to train it first.")
+
         return 0
 
     if "-i" in args:
+
         print("Models configuration:")
         pprint(cfg.__dict__)
+
         print("Models architecture:")
         summary(model)
+
         return 0
 
-    # --- Original Interactive Loop ---
+    # ---------------------------------------------------------
+    # Interactive mode
+    # ---------------------------------------------------------
+
     while True:
+
         print(
-            "Chose what to do: (q = quit, t = train, g = generate, i = model and configs info)"
+            "Choose what to do: "
+            "(q = quit, t = train, g = generate, i = model/config info)"
         )
+
         inp = input().lower()
 
         if inp == "q":
@@ -76,68 +163,134 @@ def main():
             return 0
 
         elif inp == "t":
-            if not load_model_if_exists(cfg, model, device):
-                print("start train process ...")
-                torch.manual_seed(42)
-                train(model, cfg)
-                print("training process finished, Now you can use model.")
-                return 0
-            print("Model is already trained, we loaded it.")
+
+            try:
+                train(
+                    model,
+                    cfg,
+                    device,
+                    distributed=False,
+                )
+            finally:
+                cleanup_distributed()
+
+            return 0
 
         elif inp == "g":
+
             if load_model_if_exists(cfg, model, device):
+
                 prompt = input("Enter your prompt: ")
-                generate(model, cfg, prompt, 42)
+
+                generate(
+                    model,
+                    cfg,
+                    prompt,
+                    42,
+                )
+
                 return 0
+
             print("Model not found, try to train it first.")
 
         elif inp == "i":
+
             print("Models configuration:")
             pprint(cfg.__dict__)
+
             print("Models architecture:")
             summary(model)
 
         else:
-            print("unknown input, try again.")
+            print("Unknown input, try again.")
 
 
-def generate(model, cfg: GPT_configs, prompt: str, seed=None):
+def generate(
+    model,
+    cfg: GPT_configs,
+    prompt: str,
+    seed=None,
+):
+
     if seed is not None:
         torch.manual_seed(seed)
 
     model.eval()
+
     tokenizer = tiktoken.get_encoding(cfg.ticktoken_tokenizer)
+
     generated_ids = generate_text_with_temperature_topk(
         model=model,
-        idx=text_to_token_ids(text=prompt, tokenizer=tokenizer),
+        idx=text_to_token_ids(
+            text=prompt,
+            tokenizer=tokenizer,
+        ),
         context_size=cfg.context_length,
         max_new_tokens=25,
         top_k=90,
         temperature=0.7,
     )
 
-    print(token_ids_to_text(generated_ids, tokenizer))
+    print(
+        token_ids_to_text(
+            generated_ids,
+            tokenizer,
+        )
+    )
 
 
-def train(model: GPT_model, cfg: GPT_configs):
-    # ==== LOAD TEXT AND SPLIT IT ====
+def train(
+    model: GPT_model,
+    cfg: GPT_configs,
+    device,
+    distributed: bool,
+):
+
+    # ---------------------------------------------------------
+    # Reproducibility
+    # ---------------------------------------------------------
+
+    seed = 42
+
+    # Different rank seeds are useful for dataloader shuffling,
+    # while model initialization remains synchronized by DDP.
+    torch.manual_seed(seed)
+
+    # ---------------------------------------------------------
+    # Load dataset
+    # ---------------------------------------------------------
+
+    if is_main_process():
+        print("Loading dataset...")
+
     text = load_text_data(cfg)
+
     train_ratio = 0.80
+
     split_idx = int(train_ratio * len(text))
+
     train_data = text[:split_idx]
     val_data = text[split_idx:]
 
-    # ==== TOKENIZE DATASET AND CREATE VAL AND TRAIN LOADERS ====
     tokenizer = tiktoken.get_encoding(cfg.ticktoken_tokenizer)
+
+    # ---------------------------------------------------------
+    # Dataloaders
+    # ---------------------------------------------------------
+
     train_loader = create_dataloader(
         train_data,
         batch_size=cfg.batch_size,
         max_length=cfg.context_length,
         stride=cfg.context_length,
         drop_last=True,
-        shuffle=True,
+        shuffle=not distributed,
         num_workers=0,
+        tokenizer_name=cfg.ticktoken_tokenizer,
+        distributed=distributed,
+        is_train=True,
     )
+
     val_loader = create_dataloader(
         val_data,
         batch_size=cfg.batch_size,
@@ -146,21 +299,37 @@ def train(model: GPT_model, cfg: GPT_configs):
         drop_last=False,
         shuffle=False,
         num_workers=0,
+        tokenizer_name=cfg.ticktoken_tokenizer,
+        distributed=distributed,
+        is_train=False,
     )
 
-    # ==== SETUP EPOCHS DEVICE AND OPTIMIZER ====
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model.to(device=device, dtype=torch.bfloat16)
-    optim = torch.optim.AdamW(params=model.parameters(), lr=5e-4, weight_decay=0.1)
+    # ---------------------------------------------------------
+    # Model / optimizer
+    # ---------------------------------------------------------
 
-    # ==== TRAIN MODEL ====
+    model.to(
+        device=device,
+        dtype=torch.bfloat16,
+    )
+
+    optimizer = torch.optim.AdamW(
+        params=model.parameters(),
+        lr=3e-4,
+        weight_decay=0.1,
+    )
+
+    # ---------------------------------------------------------
+    # Training
+    # ---------------------------------------------------------
+
     train_losses, val_losses, tokens_seen = train_model(
-        model,
-        train_loader,
-        val_loader,
-        cfg.epochs,
-        optim,
-        device,
+        model=model,
+        train_dataloader=train_loader,
+        val_dataloader=val_loader,
+        num_epochs=cfg.epochs,
+        optimizer=optimizer,
+        device=device,
         eval_freq=5,
         eval_iter=cfg.batch_size,
         start_context="Hello I am ",
@@ -169,36 +338,96 @@ def train(model: GPT_model, cfg: GPT_configs):
         use_checkpoints=cfg.use_checkpoints,
         checkpoint_freq=cfg.checkpoint_freq,
         checkpoint_path=cfg.checkpoints_path,
+        distributed=distributed,
     )
 
-    # ==== SAVE MODEL WITH CONFIGS ====
-    folder_name = Path(cfg.save_model_path)
-    folder_name.mkdir(exist_ok=True)
-    torch.save(model.state_dict(), (folder_name / "pytorch_model.bin"))
+    # ---------------------------------------------------------
+    # Save final model
+    # ---------------------------------------------------------
 
-    with open(folder_name / "configs.json", "w") as f:
-        json.dump(cfg.__dict__, f, indent=4)
+    if is_main_process():
 
-    save_model_hf(cfg)
+        folder = Path(cfg.save_model_path)
 
-    # ==== PLOT MODEL LOSSES ====
-    plot_losses(cfg.epochs, tokens_seen, train_losses, val_losses)
+        folder.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        torch.save(
+            model.state_dict(),
+            folder / "pytorch_model.bin",
+        )
+
+        with open(
+            folder / "configs.json",
+            "w",
+            encoding="utf-8",
+        ) as f:
+
+            json.dump(
+                cfg.__dict__,
+                f,
+                indent=4,
+            )
+
+        save_model_hf(cfg)
+
+        plot_losses(
+            cfg.epochs,
+            tokens_seen,
+            train_losses,
+            val_losses,
+        )
+
+        print("Training process finished.")
 
 
-def plot_losses(epochs_seen, tokens_seen, train_losses, val_losses):
+def plot_losses(
+    epochs_seen,
+    tokens_seen,
+    train_losses,
+    val_losses,
+):
+
     fig, ax1 = plt.subplots(figsize=(5, 3))
-    ax1.plot(epochs_seen, train_losses, label="Training loss")
-    ax1.plot(epochs_seen, val_losses, linestyle="-.", label="Validation loss")
+
+    ax1.plot(
+        epochs_seen,
+        train_losses,
+        label="Training loss",
+    )
+
+    ax1.plot(
+        epochs_seen,
+        val_losses,
+        linestyle="-.",
+        label="Validation loss",
+    )
+
     ax1.set_xlabel("Epochs")
     ax1.set_ylabel("Loss")
+
     ax1.legend(loc="upper right")
+
     ax1.xaxis.set_major_locator(MaxNLocator(integer=True))
+
     ax2 = ax1.twiny()
-    ax2.plot(tokens_seen, train_losses, alpha=0)
+
+    ax2.plot(
+        tokens_seen,
+        train_losses,
+        alpha=0,
+    )
+
     ax2.set_xlabel("Tokens seen")
+
     fig.tight_layout()
 
     fig.savefig("train-val-loss.png")
 
+    plt.close(fig)
 
-main()
+
+if __name__ == "__main__":
+    main()
