@@ -260,7 +260,6 @@ def train_model(
             local_tokens = input_batch.numel()
 
             if distributed:
-
                 tokens_tensor = torch.tensor(
                     local_tokens,
                     device=device,
@@ -275,7 +274,6 @@ def train_model(
                 tokens_seen += tokens_tensor.item()
 
             else:
-
                 tokens_seen += local_tokens
 
             global_step += 1
@@ -296,7 +294,6 @@ def train_model(
             # ------------------------------------------------
 
             if global_step % eval_freq == 0:
-
                 train_loss, val_loss = evaluate_model(
                     model,
                     train_dataloader,
@@ -563,7 +560,7 @@ def learning_rate_change(
     warmup_percent: float,
     optimizer: torch.optim.Optimizer,
     initial_lr=1e-5,
-    peak_lr=3e-4,
+    peak_lr=3e-2,
 ) -> float:
     """
     ## Update the optimizer's learning rate using a warmup then cosine decay schedule.
