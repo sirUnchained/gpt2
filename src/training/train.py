@@ -34,7 +34,7 @@ def train_model(
 
     The training loop iterates over batches from `train_dataloader`, computes the loss via
     `calc_batch_cost`, backpropagates, and updates the model weights. At intervals defined
-    by `eval_freq` (global steps), the model is evaluated on the full training and validation
+    by `eval_freq` (global steps), the model is evaluated on the `eval_iter` batch size of training and validation
     datasets, and the losses are recorded. After each complete epoch, a text sample is
     generated using `start_context` to monitor qualitative performance.
 
@@ -51,7 +51,7 @@ def train_model(
         optimizer (torch.optim.Optimizer): Optimizer used for gradient-based updates.
         device (torch.device): Device (CPU or CUDA) on which to perform computations.
         eval_freq (int): Evaluate the model every N global steps.
-        eval_iter (int): (Unused) Placeholder for the number of batches to use during
+        eval_iter (int): Placeholder for the number of batches to use during
                          evaluation. Currently, `evaluate_model` ignores this value.
         start_context (str): Initial text prompt used for sample generation after each epoch.
         tokenizer: Tokenizer instance for converting text to token IDs and vice versa.

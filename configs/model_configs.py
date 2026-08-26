@@ -5,6 +5,7 @@ import os
 
 class GPT_configs:
     epochs = 5
+    batch_size = 2
     vocab_size = 50257
     context_length = 1024
     emb_dim = 768
@@ -29,6 +30,7 @@ def get_gpt_configs():
     config = GPT_configs()
 
     config.epochs = int(os.getenv("EPOCHS", config.epochs))
+    config.batch_size = int(os.getenv("BATCH_SIZE", config.batch_size))
 
     config.vocab_size = int(os.getenv("VOCAB_SIZE", config.vocab_size))
     config.context_length = int(os.getenv("CONTEXT_LENGTH", config.context_length))

@@ -31,7 +31,7 @@ def main():
     print("Welcome to the gpt2 model pipeline! loading stuff please wait ...")
     cfg = get_gpt_configs()
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = GPT_model(cfg).to(device)
+    model = GPT_model(cfg).to(device=device)
     print(f"Current device is {device}.")
 
     if "-t" in args:
@@ -131,7 +131,7 @@ def train(model: GPT_model, cfg: GPT_configs):
     tokenizer = tiktoken.get_encoding(cfg.ticktoken_tokenizer)
     train_loader = create_dataloader(
         train_data,
-        batch_size=2,
+        batch_size=cfg.batch_size,
         max_length=cfg.context_length,
         stride=cfg.context_length,
         drop_last=True,
@@ -140,7 +140,7 @@ def train(model: GPT_model, cfg: GPT_configs):
     )
     val_loader = create_dataloader(
         val_data,
-        batch_size=2,
+        batch_size=cfg.batch_size,
         max_length=cfg.context_length,
         stride=cfg.context_length,
         drop_last=False,
@@ -161,8 +161,8 @@ def train(model: GPT_model, cfg: GPT_configs):
         cfg.epochs,
         optim,
         device,
-        eval_freq=2,
-        eval_iter=2,
+        eval_freq=5,
+        eval_iter=cfg.batch_size,
         start_context="Hello I am ",
         tokenizer=tokenizer,
         create_checkpoints=cfg.create_checkpoints,
