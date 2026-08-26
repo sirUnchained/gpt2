@@ -150,7 +150,7 @@ def train(model: GPT_model, cfg: GPT_configs):
 
     # ==== SETUP EPOCHS DEVICE AND OPTIMIZER ====
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model.to(device=device)
+    model.to(device=device, dtype=torch.bfloat16)
     optim = torch.optim.AdamW(params=model.parameters(), lr=4e-4, weight_decay=0.1)
 
     # ==== TRAIN MODEL ====
