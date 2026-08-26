@@ -28,11 +28,11 @@ class FeedForward(nn.Module):
 
         self.layers = nn.Sequential(
             nn.Linear(
-                in_features=cfg.emb_dim, out_features=cfg.emb_dim, bias=cfg.qkv_bias
+                in_features=cfg.emb_dim, out_features=cfg.emb_dim * 4, bias=cfg.qkv_bias
             ),
             Gelu(),
             nn.Linear(
-                in_features=cfg.emb_dim, out_features=cfg.emb_dim, bias=cfg.qkv_bias
+                in_features=cfg.emb_dim * 4, out_features=cfg.emb_dim, bias=cfg.qkv_bias
             ),
         )
 

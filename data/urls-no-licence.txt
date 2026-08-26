@@ -1,6 +1,7 @@
 https://gutenberg.org/cache/epub/28233/pg28233-images.html
 https://gutenberg.org/cache/epub/4763/pg4763-images.html
 https://gutenberg.org/cache/epub/26726/pg26726-images.html
+https://gutenberg.org/cache/epub/24527/pg24527-images.html
 
 https://gutenberg.org/cache/epub/73420/pg73420-images.html
 https://gutenberg.org/cache/epub/26492/pg26492-images.html
@@ -10,3 +11,8 @@ https://gutenberg.org/cache/epub/4367/pg4367-images.html
 https://gutenberg.org/cache/epub/79414/pg79414-images.html
 
 https://gutenberg.org/cache/epub/60979/pg60979-images.html
+
+https://gutenberg.org/cache/epub/4363/pg4363-images.html
+https://gutenberg.org/cache/epub/1656/pg1656-images.html
+
+https://gutenberg.org/cache/epub/46976/pg46976-images.html
