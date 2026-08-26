@@ -560,7 +560,7 @@ def learning_rate_change(
     warmup_percent: float,
     optimizer: torch.optim.Optimizer,
     initial_lr=1e-5,
-    peak_lr=3e-2,
+    peak_lr=1e-1,
 ) -> float:
     """
     ## Update the optimizer's learning rate using a warmup then cosine decay schedule.
