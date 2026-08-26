@@ -131,7 +131,7 @@ def train(model: GPT_model, cfg: GPT_configs):
     tokenizer = tiktoken.get_encoding(cfg.ticktoken_tokenizer)
     train_loader = create_dataloader(
         train_data,
-        batch_size=3,
+        batch_size=2,
         max_length=cfg.context_length,
         stride=cfg.context_length,
         drop_last=True,
@@ -140,7 +140,7 @@ def train(model: GPT_model, cfg: GPT_configs):
     )
     val_loader = create_dataloader(
         val_data,
-        batch_size=3,
+        batch_size=2,
         max_length=cfg.context_length,
         stride=cfg.context_length,
         drop_last=False,
@@ -161,8 +161,8 @@ def train(model: GPT_model, cfg: GPT_configs):
         cfg.epochs,
         optim,
         device,
-        eval_freq=3,
-        eval_iter=3,
+        eval_freq=2,
+        eval_iter=2,
         start_context="Hello I am ",
         tokenizer=tokenizer,
         create_checkpoints=cfg.create_checkpoints,
