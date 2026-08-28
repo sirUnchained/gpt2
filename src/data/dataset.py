@@ -4,9 +4,6 @@ import json
 import torch
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
-from torch.utils.data.distributed import (
-    DistributedSampler,
-)
 import tiktoken
 
 from configs.model_configs import GPT_configs
@@ -60,8 +57,6 @@ def create_dataloader(
     drop_last=True,
     num_workers=0,
     tokenizer_name="gpt2",
-    distributed=False,
-    is_train=False,
 ):
     """
     ## Dataloader Creator
@@ -92,35 +87,13 @@ def create_dataloader(
     """
 
     tokenizer = tiktoken.get_encoding(tokenizer_name)
-
-    dataset = GPT2DatasetV1(
-        txt,
-        tokenizer,
-        max_length,
-        stride,
-    )
-
-    sampler = None
-
-    if distributed:
-
-        sampler = DistributedSampler(
-            dataset,
-            shuffle=shuffle,
-            drop_last=drop_last,
-        )
-
-        # Sampler controls ordering.
-        shuffle = False
-
+    dataset = GPT2DatasetV1(txt, tokenizer, max_length, stride)
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
-        sampler=sampler,
-        drop_last=drop_last,
-        num_workers=num_workers,
-        pin_memory=torch.cuda.is_available(),
+        drop_last=drop_last,  # drops the last batch if it is shorter than the specified batch_size to prevent loss spikes during training.
+        num_workers=num_workers,  # The number of CPU processes to use for preprocessing
     )
 
     return dataloader
