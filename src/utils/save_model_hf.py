@@ -1,15 +1,16 @@
 from huggingface_hub import HfApi, create_repo
 
-from configs.model_configs import GPT_configs
-
 
 import os
-from huggingface_hub import HfApi, create_repo
+import getpass
+
+from configs.model_configs import GPT_configs
 from configs.model_configs import GPT_configs
 
-import getpass
+from huggingface_hub import HfApi, create_repo
 from huggingface_hub import login, whoami
 from huggingface_hub.errors import HfHubHTTPError
+from huggingface_hub.utils import disable_progress_bars
 
 
 def ensure_huggingface_login(cfg):

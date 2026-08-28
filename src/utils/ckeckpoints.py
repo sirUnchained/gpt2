@@ -2,6 +2,8 @@ import os
 import functools
 
 import torch
+
+from huggingface_hub.utils import disable_progress_bars
 from huggingface_hub import HfApi, create_repo
 from huggingface_hub.utils import HfHubHTTPError
 
@@ -28,6 +30,7 @@ def _push_checkpoint_to_hub(path, repo_id, epoch, global_step):
     Never raises: a Hub/network hiccup should not crash a training run. Errors are
     printed as warnings instead.
     """
+
     filename = os.path.basename(path)
     path_in_repo = f"{HF_CHECKPOINTS_SUBFOLDER}/{filename}"
 

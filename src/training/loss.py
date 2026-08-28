@@ -1,4 +1,30 @@
 import torch
+import math
+
+
+def calc_perplexity(loss) -> float:
+    """
+    ## Convert a cross-entropy loss value into perplexity.
+
+    Perplexity = exp(cross-entropy loss). It's the standard human-readable
+    evaluation metric for language models: roughly "how many tokens, on
+    average, was the model choosing between" at each step. Lower is better.
+
+    Note: if you're using `z_loss_coeff` > 0 in `calc_batch_cost`, pass the
+    plain cross-entropy component here (not the combined loss), since the
+    z-loss term isn't part of the probabilistic interpretation perplexity relies on.
+
+    Args:
+        loss (torch.Tensor | float): A (mean) cross-entropy loss value.
+
+    Returns:
+        float: The corresponding perplexity. `inf` if the loss overflows exp().
+    """
+    loss_value = loss.item() if isinstance(loss, torch.Tensor) else float(loss)
+    try:
+        return math.exp(loss_value)
+    except OverflowError:
+        return float("inf")
 
 
 def calc_batch_cost(inp_batch, target_batch, model, device):

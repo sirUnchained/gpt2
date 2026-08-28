@@ -7,7 +7,7 @@ import tiktoken
 from scripts.evaluate import generate_text, text_to_token_ids, token_ids_to_text
 from configs.model_configs import GPT_configs
 from src.data.dataset import create_dataloader
-from src.training.loss import calc_loader_cost, calc_batch_cost
+from src.training.loss import calc_loader_cost, calc_batch_cost, calc_perplexity
 from src.models.gpt_model import GPT_model
 from src.data.dataset import load_text_data
 from src.utils.ckeckpoints import load_checkpoint, save_checkpoint
@@ -123,6 +123,8 @@ def train_model(
                     f"Epoch {epoch+1} (Step {global_step:06d}): "
                     f"Train loss {train_loss:.3f}, "
                     f"Val loss {val_loss:.3f}, "
+                    f"Train perplexity {calc_perplexity(train_loss)}"
+                    f"Val perplexity {calc_perplexity(val_loss)}"
                     # f"LR {lr:.3e}"
                 )
 
