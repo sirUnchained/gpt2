@@ -1,3 +1,4 @@
 model-weights/*
 __pycache__
 .vscode
+pretrain-result.txt

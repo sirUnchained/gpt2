@@ -19,7 +19,7 @@ from configs.model_configs import get_gpt_configs, GPT_configs
 from src.data.dataset import create_dataloader, load_text_data
 from src.training.train import train_model
 from src.models.gpt_model import GPT_model
-from src.utils.save_model_hf import save_model_hf
+from src.utils.save_model_hf import save_model_hf, ensure_huggingface_login
 from src.utils.load_model import load_model_if_exists
 
 
@@ -91,6 +91,9 @@ def main():
     # ---------------------------------------------------------
     # Training
     # ---------------------------------------------------------
+
+    if cfg.repo_id != "INVALID":
+        ensure_huggingface_login(cfg=cfg)
 
     if "-t" in args:
 
@@ -205,6 +208,7 @@ def main():
             print("Unknown input, try again.")
 
 
+<<<<<<< HEAD
 def generate(
     model,
     cfg: GPT_configs,
@@ -215,6 +219,9 @@ def generate(
     if seed is not None:
         torch.manual_seed(seed)
 
+=======
+def generate(model, cfg: GPT_configs, prompt: str, seed=None):
+>>>>>>> before-turning-code-into-distributed-gpus
     model.eval()
 
     tokenizer = tiktoken.get_encoding(cfg.ticktoken_tokenizer)
@@ -304,6 +311,7 @@ def train(
         is_train=False,
     )
 
+<<<<<<< HEAD
     # ---------------------------------------------------------
     # Model / optimizer
     # ---------------------------------------------------------
@@ -322,6 +330,12 @@ def train(
     # ---------------------------------------------------------
     # Training
     # ---------------------------------------------------------
+=======
+    # ==== SETUP EPOCHS DEVICE AND OPTIMIZER ====
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model.to(device=device)
+    optim = torch.optim.AdamW(params=model.parameters(), lr=4e-4, weight_decay=0.1)
+>>>>>>> before-turning-code-into-distributed-gpus
 
     train_losses, val_losses, tokens_seen = train_model(
         model=model,
@@ -332,7 +346,7 @@ def train(
         device=device,
         eval_freq=5,
         eval_iter=cfg.batch_size,
-        start_context="Hello I am ",
+        start_context="Hello I am",
         tokenizer=tokenizer,
         create_checkpoints=cfg.create_checkpoints,
         use_checkpoints=cfg.use_checkpoints,

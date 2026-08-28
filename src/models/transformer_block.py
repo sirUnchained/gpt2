@@ -50,7 +50,7 @@ class TransformerBlock(nn.Module):
             qkv_bias=cfg.qkv_bias,
         )
 
-        self.dropout = nn.Dropout(p=0)
+        self.dropout = nn.Dropout(p=cfg.drop_rate)
 
         self.norm_1 = LayerNormalizer(emb_dim=cfg.emb_dim)
 
