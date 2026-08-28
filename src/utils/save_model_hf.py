@@ -1,10 +1,10 @@
-from huggingface_hub import HfApi, create_repo, notebook_login
+from huggingface_hub import HfApi, create_repo
 
 from configs.model_configs import GPT_configs
 
 
 import os
-from huggingface_hub import HfApi, create_repo, notebook_login
+from huggingface_hub import HfApi, create_repo
 from configs.model_configs import GPT_configs
 
 import getpass

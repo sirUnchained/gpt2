@@ -34,6 +34,9 @@ def main():
     model = GPT_model(cfg).to(device=device)
     print(f"Current device is {device}.")
 
+    if cfg.repo_id != "INVALID":
+        ensure_huggingface_login(cfg=cfg)
+
     if "-t" in args:
         if not load_model_if_exists(cfg, model, device):
             print("start train process ...")
@@ -102,8 +105,6 @@ def main():
 
 
 def generate(model, cfg: GPT_configs, prompt: str, seed=None):
-    ensure_huggingface_login(cfg=cfg)
-
     model.eval()
     tokenizer = tiktoken.get_encoding(cfg.ticktoken_tokenizer)
     generated_ids = generate_text_with_temperature_topk(
@@ -119,9 +120,6 @@ def generate(model, cfg: GPT_configs, prompt: str, seed=None):
 
 
 def train(model: GPT_model, cfg: GPT_configs):
-    if cfg.repo_id != "INVALID":
-        pass
-
     # ==== LOAD TEXT AND SPLIT IT ====
     text = load_text_data(cfg)
     train_ratio = 0.80
