@@ -3,7 +3,6 @@ import functools
 
 import torch
 
-from huggingface_hub.utils import disable_progress_bars
 from huggingface_hub import HfApi, create_repo
 from huggingface_hub.utils import HfHubHTTPError
 

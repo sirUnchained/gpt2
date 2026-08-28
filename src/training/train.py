@@ -121,10 +121,10 @@ def train_model(
 
                 print(
                     f"Epoch {epoch+1} (Step {global_step:06d}): "
-                    f"Train loss {train_loss:.3f}, "
-                    f"Val loss {val_loss:.3f}, "
-                    f"Train perplexity {calc_perplexity(train_loss)}"
-                    f"Val perplexity {calc_perplexity(val_loss)}"
+                    f"Train loss {train_loss:.3f} | "
+                    f"Val loss {val_loss:.3f} | "
+                    f"Train perplexity {calc_perplexity(train_loss):.3f} | "
+                    f"Val perplexity {calc_perplexity(val_loss):.3f} | "
                     # f"LR {lr:.3e}"
                 )
 
