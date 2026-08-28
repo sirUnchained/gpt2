@@ -11,7 +11,7 @@ from configs.model_configs import get_gpt_configs, GPT_configs
 from src.data.dataset import create_dataloader, load_text_data
 from src.training.train import train_model
 from src.models.gpt_model import GPT_model
-from src.utils.save_model_hf import save_model_hf
+from src.utils.save_model_hf import save_model_hf, ensure_huggingface_login
 from src.utils.load_model import load_model_if_exists
 
 import torch
@@ -102,8 +102,7 @@ def main():
 
 
 def generate(model, cfg: GPT_configs, prompt: str, seed=None):
-    if seed is not None:
-        torch.manual_seed(seed)
+    ensure_huggingface_login(cfg=cfg)
 
     model.eval()
     tokenizer = tiktoken.get_encoding(cfg.ticktoken_tokenizer)
@@ -120,6 +119,9 @@ def generate(model, cfg: GPT_configs, prompt: str, seed=None):
 
 
 def train(model: GPT_model, cfg: GPT_configs):
+    if cfg.repo_id != "INVALID":
+        pass
+
     # ==== LOAD TEXT AND SPLIT IT ====
     text = load_text_data(cfg)
     train_ratio = 0.80

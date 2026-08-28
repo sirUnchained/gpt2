@@ -41,10 +41,14 @@ def _push_checkpoint_to_hub(path, repo_id, epoch, global_step):
             repo_id=repo_id,
             commit_message=f"Add checkpoint (epoch {epoch}, step {global_step})",
         )
-        print(f"Checkpoint pushed to https://huggingface.co/{repo_id}/blob/main/{path_in_repo}")
+        print(
+            f"Checkpoint pushed to https://huggingface.co/{repo_id}/blob/main/{path_in_repo}"
+        )
     except HfHubHTTPError as exc:
         print(f"Warning: Hugging Face Hub rejected the checkpoint upload: {exc}")
-    except Exception as exc:  # noqa: BLE001 - deliberately broad, this must never kill training
+    except (
+        Exception
+    ) as exc:  # noqa: BLE001 - deliberately broad, this must never kill training
         print(f"Warning: failed to push checkpoint to Hugging Face Hub: {exc}")
 
 
