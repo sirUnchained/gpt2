@@ -2,6 +2,7 @@ import os
 import math
 
 import torch
+from torch.amp import autocast, GradScaler
 import tiktoken
 
 from scripts.evaluate import generate_text, text_to_token_ids, token_ids_to_text
@@ -28,6 +29,8 @@ def train_model(
     checkpoint_freq: int = 1000,  # save every N global steps, in addition to per-epoch
     use_checkpoints=False,
     create_checkpoints=False,
+    grad_accum_steps: int = 1,
+    use_amp: bool = False,
 ):
     """
     Trains a language model over multiple epochs with periodic evaluation and checkpointing.
@@ -62,6 +65,18 @@ def train_model(
                                           `{checkpoint_path}/latest.pt`. Defaults to False.
         create_checkpoints (bool, optional): If True, save periodic and end-of-epoch
                                               checkpoints to `checkpoint_path`. Defaults to False.
+        grad_accum_steps (int, optional): Number of micro-batches to accumulate gradients
+                                          over before calling `optimizer.step()`. The
+                                          effective batch size becomes
+                                          `train_dataloader.batch_size * grad_accum_steps`,
+                                          letting you simulate a larger batch than fits in
+                                          GPU memory at once. Defaults to 1 (no accumulation,
+                                          original behavior).
+        use_amp (bool, optional): If True, run the forward pass and loss computation under
+                                  automatic mixed precision (fp16 autocast) with gradient
+                                  scaling, roughly halving activation memory and speeding up
+                                  matmuls on GPUs with fp16 tensor cores (e.g. T4/V100/A100).
+                                  Automatically disabled on non-CUDA devices. Defaults to False.
 
     Returns:
         tuple: A 3-element tuple containing:
@@ -82,6 +97,22 @@ def train_model(
 
     latest_ckpt_path = os.path.join(checkpoint_path, "latest.pt")
 
+    device_type = device if isinstance(device, str) else device.type
+    amp_enabled = use_amp and device_type == "cuda"
+    if use_amp and not amp_enabled:
+        print(
+            f"use_amp=True but device is '{device_type}' (not 'cuda') — AMP disabled."
+        )
+
+    scaler = GradScaler(device_type, enabled=amp_enabled)
+
+    effective_batch_size = train_dataloader.batch_size * grad_accum_steps
+    print(
+        f"Training with micro-batch size {train_dataloader.batch_size}, "
+        f"grad_accum_steps={grad_accum_steps} -> effective batch size {effective_batch_size}. "
+        f"AMP: {'on' if amp_enabled else 'off'}."
+    )
+
     # --- Resume from checkpoint if requested and available ---
     if use_checkpoints and os.path.exists(latest_ckpt_path):
         checkpoint = load_checkpoint(latest_ckpt_path, model, optimizer, device)
@@ -98,21 +129,40 @@ def train_model(
 
     for epoch in range(start_epoch, num_epochs):
         model.train()
+        optimizer.zero_grad(set_to_none=True)
+        accum_counter = 0
 
         for input_batch, target_batch in train_dataloader:
-            optimizer.zero_grad()
-            loss = calc_batch_cost(input_batch, target_batch, model, device)
-            loss.backward()
-            optimizer.step()
+            with autocast(
+                device_type=device_type, dtype=torch.float16, enabled=amp_enabled
+            ):
+                loss = calc_batch_cost(input_batch, target_batch, model, device)
+                # divide so accumulated gradients average correctly over grad_accum_steps
+                loss = loss / grad_accum_steps
+
+            scaler.scale(loss).backward()
+            accum_counter += 1
 
             tokens_seen += input_batch.numel()
             global_step += 1
 
             # lr = learning_rate_change(global_step, total_steps, 0.2, optimizer)
 
+            # --- Only step the optimizer once we've accumulated enough micro-batches ---
+            if accum_counter == grad_accum_steps:
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
+                accum_counter = 0
+
             if global_step % eval_freq == 0:
                 train_loss, val_loss = evaluate_model(
-                    model, train_dataloader, val_dataloader, device, eval_iter
+                    model,
+                    train_dataloader,
+                    val_dataloader,
+                    device,
+                    eval_iter,
+                    use_amp=amp_enabled,
                 )
                 train_losses.append(train_loss.item())  # type: ignore
                 val_losses.append(val_loss.item())  # type: ignore
@@ -123,8 +173,8 @@ def train_model(
                     f"Epoch {epoch+1} (Step {global_step:06d}): "
                     f"Train loss {train_loss:.3f} | "
                     f"Val loss {val_loss:.3f} | "
-                    f"Train perplexity {calc_perplexity(train_loss):.3f} | "
-                    f"Val perplexity {calc_perplexity(val_loss):.3f} | "
+                    f"Train PPL {calc_perplexity(train_loss):.3f} | "
+                    f"Val PPL {calc_perplexity(val_loss):.3f} | "
                     # f"LR {lr:.3e}"
                 )
 
@@ -145,6 +195,13 @@ def train_model(
                     val_losses,
                     track_tokens_seen,
                 )
+
+        # --- Flush any leftover accumulated gradients that didn't reach a full accum window ---
+        if accum_counter > 0:
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+            accum_counter = 0
 
         generate_and_print_sample(model, tokenizer, device, start_context)
 
@@ -178,7 +235,9 @@ def train_model(
     return train_losses, val_losses, track_tokens_seen
 
 
-def evaluate_model(model, train_dataloader, val_dataloader, device, eval_iter):
+def evaluate_model(
+    model, train_dataloader, val_dataloader, device, eval_iter, use_amp=False
+):
     """
     ## Evaluate the model on the training and validation dataloaders.
 
@@ -195,13 +254,20 @@ def evaluate_model(model, train_dataloader, val_dataloader, device, eval_iter):
         device (torch.device): Device on which the tensors are allocated.
         eval_iter (int): Number of batches to use for evaluation (currently unused,
                          kept for compatibility with the training loop).
+        use_amp (bool, optional): If True, run evaluation under fp16 autocast too
+                                  (no gradient scaling needed since there's no backward
+                                  pass here). Should mirror the `amp_enabled` flag used
+                                  in `train_model`. Defaults to False.
 
     Returns:
         tuple: (train_loss, val_loss) where each is a scalar tensor representing
                the average cross-entropy loss over the respective dataloader.
     """
+    device_type = device if isinstance(device, str) else device.type
     model.eval()
-    with torch.no_grad():
+    with torch.no_grad(), autocast(
+        device_type=device_type, dtype=torch.float16, enabled=use_amp
+    ):
         train_loss = calc_loader_cost(train_dataloader, model, device, eval_iter)
         val_loss = calc_loader_cost(val_dataloader, model, device, eval_iter)
     model.train()
@@ -319,4 +385,6 @@ if __name__ == "__main__":
         start_context="Hello I am ",
         tokenizer=tokenizer,
         checkpoint_path=cfg.checkpoints_path,
+        grad_accum_steps=8,
+        use_amp=True,
     )
