@@ -282,14 +282,19 @@ async def scrape_one(
     semaphore: asyncio.Semaphore,
     seen_hashes: set,
     hashes_lock: asyncio.Lock,
-) -> Optional[dict]:
+    output_file: str,
+    write_lock: asyncio.Lock,
+) -> bool:
+    """Fetches, filters and (on success) immediately appends one record to
+    output_file. Returns True/False instead of the record itself, since the
+    record is written straight to disk and never held in memory."""
     parsed = urlparse(url)
     domain = parsed.netloc
 
     rp, delay = await robots_cache.get(domain, session)
     if not rp.can_fetch(USER_AGENT, url):
         print(f"⛔ {url} – disallowed by robots.txt")
-        return None
+        return False
 
     domain_lock = await domain_throttle.get_lock(domain)
 
@@ -326,14 +331,14 @@ async def scrape_one(
                         print(
                             f"🚫 {url} – non-HTML content-type: {content_type or 'unknown'}"
                         )
-                        return None
+                        return False
 
                     content_length = resp.headers.get("Content-Length")
                     if content_length and int(content_length) > MAX_CONTENT_BYTES:
                         print(
                             f"🚫 {url} – too large ({content_length} bytes), skipping"
                         )
-                        return None
+                        return False
 
                     html = await resp.text()
                     if len(html) > MAX_CONTENT_BYTES:
@@ -343,31 +348,28 @@ async def scrape_one(
 
                     if has_ai_opt_out(soup, resp.headers):
                         print(f"🚫 {url} – AI/indexing opt-out signal present")
-                        return None
+                        return False
 
                     lic, verified = detect_license(soup, url)
                     if FILTER_BY_LICENSE and not is_license_allowed(lic, verified):
                         print(
                             f"🚫 {url} – license not allowed: {lic} (verified={verified})"
                         )
-                        return None
+                        return False
 
                     text = extract_main_text(soup)
                     if not text:
                         print(f"📭 {url} – no text extracted")
-                        return None
+                        return False
 
                     h = content_hash(text)
                     async with hashes_lock:
                         if h in seen_hashes:
                             print(f"♻️ {url} – duplicate content, skipping")
-                            return None
+                            return False
                         seen_hashes.add(h)
 
-                    print(
-                        f"✅ {url} – {len(text)} chars, license: {lic} (verified={verified})"
-                    )
-                    return {
+                    record = {
                         "url": url,
                         "license": lic,
                         "license_verified": verified,
@@ -378,6 +380,16 @@ async def scrape_one(
                         "text": text,
                     }
 
+                    # Write straight to disk as soon as it's ready -- results
+                    # are never accumulated in memory.
+                    async with write_lock:
+                        append_jsonl(output_file, record)
+
+                    print(
+                        f"✅ {url} – {len(text)} chars, license: {lic} (verified={verified})"
+                    )
+                    return True
+
             except asyncio.TimeoutError:
                 print(f"⌛ {url} – timeout ({attempt}/{MAX_RETRIES})")
             except Exception as e:
@@ -387,7 +399,36 @@ async def scrape_one(
                 await asyncio.sleep(RETRY_BACKOFF**attempt)
 
         print(f"💀 {url} – failed after {MAX_RETRIES} attempts")
-        return None
+        return False
+
+
+# -------------------------------------------------------------------
+# Load already-scraped URLs/hashes from an existing JSONL file, so re-runs
+# resume instead of re-downloading and re-storing what's already there.
+# -------------------------------------------------------------------
+def load_existing_records(output_file: str) -> Tuple[set, set]:
+    existing_urls: set = set()
+    existing_hashes: set = set()
+
+    if not os.path.exists(output_file):
+        return existing_urls, existing_hashes
+
+    with open(output_file, "r", encoding="utf-8") as f:
+        for line_num, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                print(f"⚠️ {output_file}:{line_num} – skipping malformed JSON line")
+                continue
+            if "url" in record:
+                existing_urls.add(record["url"])
+            if "content_hash" in record:
+                existing_hashes.add(record["content_hash"])
+
+    return existing_urls, existing_hashes
 
 
 # -------------------------------------------------------------------
@@ -401,34 +442,51 @@ async def scrape_urls(urls: List[str], output_file: str):
             seen.add(u)
             unique.append(u)
 
+    # Resume support: never re-download a URL that's already in the file,
+    # and never re-store content whose hash is already present.
+    existing_urls, seen_hashes = load_existing_records(output_file)
+    to_fetch = [u for u in unique if u not in existing_urls]
+    skipped = len(unique) - len(to_fetch)
+
     print(
-        f"📋 Starting {len(unique)} unique URLs (max concurrency={MAX_CONCURRENT}, "
+        f"📋 {len(unique)} unique URLs ({skipped} already in '{output_file}', "
+        f"{len(to_fetch)} to fetch; max concurrency={MAX_CONCURRENT}, "
         f"per-domain requests serialized to respect crawl-delay)"
     )
 
-    semaphore = asyncio.Semaphore(MAX_CONCURRENT)
-    seen_hashes: set = set()
-    hashes_lock = asyncio.Lock()
+    if not to_fetch:
+        print("🎉 Nothing new to fetch.")
+        return
 
-    # Start with a clean file
-    open(output_file, "w", encoding="utf-8").close()
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+    hashes_lock = asyncio.Lock()
+    write_lock = asyncio.Lock()
+
+    # Append to the existing file rather than truncating it -- previously
+    # scraped records are preserved across runs.
+    if not os.path.exists(output_file):
+        open(output_file, "w", encoding="utf-8").close()
 
     connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT * 2)
     async with aiohttp.ClientSession(connector=connector) as session:
         tasks = [
-            scrape_one(session, url, semaphore, seen_hashes, hashes_lock)
-            for url in unique
+            scrape_one(
+                session,
+                url,
+                semaphore,
+                seen_hashes,
+                hashes_lock,
+                output_file,
+                write_lock,
+            )
+            for url in to_fetch
         ]
         results = await asyncio.gather(*tasks)
 
-    count = 0
-    for res in results:
-        if res is not None:
-            append_jsonl(output_file, res)
-            count += 1
+    count = sum(1 for ok in results if ok)
 
     print(
-        f"\n🎉 Done. {count} documents saved to '{output_file}' (JSONL, one record per line)."
+        f"\n🎉 Done. {count} new documents appended to '{output_file}' (JSONL, one record per line)."
     )
 
 
@@ -440,11 +498,13 @@ def read_urls_from_file(filepath: str) -> List[str]:
 if __name__ == "__main__":
     import sys
 
-    if len(sys.argv) != 2:
-        print("Usage: python scraper.py urls.txt")
+    if len(sys.argv) not in (2, 3):
+        print(f"Usage: python scraper.py urls.txt [output.jsonl]")
         sys.exit(1)
 
     url_file = sys.argv[1]
+    output_file = sys.argv[2] if len(sys.argv) == 3 else OUTPUT_FILE
+
     if not os.path.exists(url_file):
         print(f"File not found: {url_file}")
         sys.exit(1)
@@ -454,7 +514,7 @@ if __name__ == "__main__":
         print("No URLs found.")
         sys.exit(1)
 
-    asyncio.run(scrape_urls(urls, OUTPUT_FILE))
+    asyncio.run(scrape_urls(urls, output_file))
 
     # Tokenize the entire dataset (only if file exists and has content)
     try:
@@ -462,7 +522,7 @@ if __name__ == "__main__":
 
         total_tokens = 0
         tokenizer = tiktoken.get_encoding(TOKENIZER_NAME)
-        with open(OUTPUT_FILE, "r", encoding="utf-8") as f:
+        with open(output_file, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -477,4 +537,4 @@ if __name__ == "__main__":
         else:
             print("The output file is empty. No tokens to count.")
     except FileNotFoundError:
-        print(f"File '{OUTPUT_FILE}' not found. No data scraped successfully.")
+        print(f"File '{output_file}' not found. No data scraped successfully.")
