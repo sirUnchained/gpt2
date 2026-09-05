@@ -44,8 +44,13 @@ class GPT_model(nn.Module):
         self.final_norm = LayerNormalizer(emb_dim=cfg.emb_dim)
 
         self.out_head = nn.Linear(
-            in_features=cfg.emb_dim, out_features=cfg.vocab_size, bias=cfg.qkv_bias
+            in_features=cfg.emb_dim, out_features=cfg.vocab_size, bias=False
         )
+
+        # Important: Real GPT-2 ties the token embedding matrix (wte) and the output projection
+        # (lm_head), they literally share the same weight tensor.
+        # So if you don't uncomment code below, your model will be larger than what it was in the main paper.
+        self.out_head.weight = self.tok_emb.weight
 
     def forward(self, input_sequences: torch.Tensor) -> torch.Tensor:
         """

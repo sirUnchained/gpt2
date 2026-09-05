@@ -61,10 +61,7 @@ def main():
         return 0
 
     if "-i" in args:
-        print("Models configuration:")
-        pprint(cfg.__dict__)
-        print("Models architecture:")
-        summary(model)
+        model_info(model, cfg)
         return 0
 
     # --- Original Interactive Loop ---
@@ -95,13 +92,30 @@ def main():
             print("Model not found, try to train it first.")
 
         elif inp == "i":
-            print("Models configuration:")
-            pprint(cfg.__dict__)
-            print("Models architecture:")
-            summary(model)
+            model_info(model, cfg)
 
         else:
             print("unknown input, try again.")
+
+
+def model_info(model, cfg):
+    print("Model's configuration:")
+    pprint(cfg.__dict__)
+    print("=================================================================")
+    print("Model's real tranable parameters count:")
+    print(sum(p.numel() for p in model.parameters()))
+    if model.tok_emb.weight is model.out_head.weight:
+        print(
+            "[INFO] You correctly tied token embedding matrix (wte) and the output projection (lm_head). "
+            "So your model will be same size as the original gpt2 and ignore what torchinfo say about `Trainable params`."
+        )
+    else:
+        print(
+            "[WARNING] You didn't tie token embedding matrix (wte) and the output projection (lm_head). "
+            "So your model will be bigger than original gpt2."
+        )
+    print("Model's architecture (torchinfo summary):")
+    summary(model)
 
 
 def generate(model, cfg: GPT_configs, prompt: str, seed=None):
