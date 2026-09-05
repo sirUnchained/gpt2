@@ -14,7 +14,7 @@ from typing import List, Optional, Dict, Tuple
 # -------------------------------------------------------------------
 OUTPUT_FILE = "llm_dataset.jsonl"
 REQUEST_TIMEOUT = 15
-MAX_CONCURRENT = 5  # global concurrency cap across all domains
+MAX_CONCURRENT = 10  # global concurrency cap across all domains
 MAX_RETRIES = 3
 RETRY_BACKOFF = 2
 USER_AGENT = "LLM Dataset Builder/1.0 (+https://myproject.org/bot)"  # honest UA
